@@ -1,9 +1,7 @@
-#**config.schema.json**
-
-```json
 {
   "pluginAlias": "HomebridgeSensi",
   "pluginType": "accessory",
+  "singular": true,
   "schema": {
     "type": "object",
     "properties": {
@@ -15,13 +13,8 @@
       "refreshToken": {
         "title": "Refresh Token",
         "type": "string"
-      },
-      "deviceId": {
-        "title": "Device ID",
-        "type": "string"
       }
     },
-    "required": ["refreshToken", "deviceId"]
+    "required": ["refreshToken"]
   }
 }
-```
