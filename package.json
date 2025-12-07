@@ -1,6 +1,6 @@
 {
   "name": "homebridge-sensi",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Homebridge plugin for Emerson Sensi thermostats using WebSocket API",
   "main": "dist/index.js",
   "scripts": {
@@ -34,11 +34,11 @@
   },
   "author": "Kitra Drago",
   "license": "MIT",
-  "homepage": "https://github.com/kitradrago/homebridge-sensi#readme"
-  "displayName": "Homebridge Sensi",
-  "pluginAlias": "SensiPlatform",
-  "pluginType": "platform"
+  "homepage": "https://github.com/kitradrago/homebridge-sensi#readme",
   "bugs": {
     "url": "https://github.com/kitradrago/homebridge-sensi/issues"
   },
+  "displayName": "Homebridge Sensi",
+  "pluginAlias": "SensiPlatform",
+  "pluginType": "platform"
 }
