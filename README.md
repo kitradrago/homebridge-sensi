@@ -93,7 +93,7 @@ Source code is in src/.
 Run npm run build to compile to dist/.
 Entry point is src/index.ts.
 
-I welcome suggestion, improvements, and people interested in helping to maintain this plugin. Especially since chances are my ADHD will forget this event exists until mine stops working.
+I welcome suggestion, improvements, and people interested in helping to maintain this plugin. Especially since chances are my ADHD will forget this even exists until mine stops working.
 
 Thanks for downloading it!
 
