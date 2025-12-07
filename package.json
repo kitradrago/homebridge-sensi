@@ -34,7 +34,11 @@
   },
   "author": "Kitra Drago",
   "license": "MIT",
+  "homepage": "https://github.com/kitradrago/homebridge-sensi#readme"
   "displayName": "Homebridge Sensi",
   "pluginAlias": "SensiPlatform",
   "pluginType": "platform"
+  "bugs": {
+    "url": "https://github.com/kitradrago/homebridge-sensi/issues"
+  },
 }

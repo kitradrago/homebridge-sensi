@@ -1,18 +1,23 @@
 {
   "pluginAlias": "SensiPlatform",
   "pluginType": "platform",
-  "strictValidation": true,
   "schema": {
     "type": "object",
-    "required": ["refreshToken"],
-    "additionalProperties": false,
     "properties": {
-      "refreshToken": {
-        "title": "Sensi Refresh Token",
+      "name": {
         "type": "string",
-        "default": "",
-        "description": "A homebridge plugin to control your sensi thermostat."
+        "title": "Name",
+        "default": "Sensi"
+      },
+      "refreshToken": {
+        "type": "string",
+        "title": "Sensi Refresh Token",
+        "description": "Paste the refresh token obtained from your Sensi app."
       }
-    }
+    },
+    "required": [
+      "name",
+      "refreshToken"
+    ]
   }
 }
