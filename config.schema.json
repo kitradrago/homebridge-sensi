@@ -1,0 +1,18 @@
+{
+  "pluginAlias": "SensiPlatform",
+  "pluginType": "platform",
+  "strictValidation": true,
+  "schema": {
+    "type": "object",
+    "required": ["refreshToken"],
+    "additionalProperties": false,
+    "properties": {
+      "refreshToken": {
+        "title": "Sensi Refresh Token",
+        "type": "string",
+        "default": "",
+        "description": "A homebridge plugin to control your sensi thermostat."
+      }
+    }
+  }
+}

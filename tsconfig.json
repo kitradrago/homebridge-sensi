@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",                  // modern but widely supported
+    "lib": ["ES2020"],                   // Node environment, no DOM
+    "rootDir": "src",                    // your source folder
+    "module": "CommonJS",                // ensures Node can load it
+    "moduleResolution": "Node",          // standard Node resolution
+    "strict": true,
+    "declaration": true,                 // generates .d.ts files
+    "outDir": "dist",
+    "sourceMap": true,
+    "esModuleInterop": true,             // allows default imports from CJS
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
