@@ -12,7 +12,7 @@
       "refreshToken": {
         "type": "string",
         "title": "Sensi Refresh Token",
-        "description": "Paste the refresh token obtained from your Sensi app."
+        "description": "Paste the refresh token obtained Emerson Sensi.  See Readme.md for instructions"
       }
     },
     "required": [
