@@ -39,14 +39,17 @@ jobs:
 
       - name: Install & Build
         run: |
-          npm ci
-          npm run build
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
 
       - name: Publish to npm
         # If package is scoped, ensure --access public
         run: |
           # Use --access public for scoped packages
-          if grep -q '"name":\\s*@"' package.json; then
+          if grep -q '"name":\s*@"' package.json; then
             npm publish --access public
           else
             npm publish
