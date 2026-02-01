@@ -13,7 +13,7 @@ the API Code.
 ## ✨ Features
 - Real‑time thermostat and sensor updates via WebSocket
 - Automatic reconnect and keep‑alive pings
-- Control temperature, mode, fan, and circulating fan
+- Control tempeårature, mode, fan, and circulating fan
 - Proper Celsius conversion for HomeKit compatibility
 - Simple configuration: only requires a refresh token
 
