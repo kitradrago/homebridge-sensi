@@ -42,3 +42,8 @@
   "pluginAlias": "SensiPlatform",
   "pluginType": "platform"
 }
+{
+  "devDependencies": {
+    "homebridge": "^1.8.0"
+  }
+}
