@@ -1,8 +1,12 @@
-# Publish to npm when a GitHub release is published.
-# Trigger: create a GitHub Release (published) or push a tag with a release.
 on:
   release:
     types: [published]
+
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (e.g. 1.2.3). Leave empty to use package.json version.'
+        required: false
 
 jobs:
   publish:
@@ -28,13 +32,20 @@ jobs:
         run: |
           npm config set //registry.npmjs.org/:_authToken="${NODE_AUTH_TOKEN}"
 
-      - name: Use release tag as package version (if release tag is vX.Y.Z)
-        # This makes package.json version match the release tag (remove leading 'v' if present).
+      - name: Set package version
         run: |
-          TAG="${GITHUB_REF##*/}"
-          VERSION="${TAG#v}"
-          echo "Release tag: $TAG -> version: $VERSION"
-          # update package.json version to the release tag version
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+            VERSION="${TAG#v}"
+            echo "Using release tag version: $VERSION"
+          elif [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+            echo "Using manual input version: $VERSION"
+          else
+            echo "No version override provided; using package.json version"
+            exit 0
+          fi
+
           node -e "let p=require('./package.json'); p.version='${VERSION}'; require('fs').writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');"
 
       - name: Install & Build
@@ -46,9 +57,7 @@ jobs:
           fi
 
       - name: Publish to npm
-        # If package is scoped, ensure --access public
         run: |
-          # Use --access public for scoped packages
           if grep -q '"name":\s*@"' package.json; then
             npm publish --access public
           else
