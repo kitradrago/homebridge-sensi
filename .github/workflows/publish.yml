@@ -1,0 +1,55 @@
+# Publish to npm when a GitHub release is published.
+# Trigger: create a GitHub Release (published) or push a tag with a release.
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Configure npm auth
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm config set //registry.npmjs.org/:_authToken="${NODE_AUTH_TOKEN}"
+
+      - name: Use release tag as package version (if release tag is vX.Y.Z)
+        # This makes package.json version match the release tag (remove leading 'v' if present).
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          echo "Release tag: $TAG -> version: $VERSION"
+          # update package.json version to the release tag version
+          node -e "let p=require('./package.json'); p.version='${VERSION}'; require('fs').writeFileSync('package.json', JSON.stringify(p,null,2)+'\n');"
+
+      - name: Install & Build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Publish to npm
+        # If package is scoped, ensure --access public
+        run: |
+          # Use --access public for scoped packages
+          if grep -q '"name":\\s*@"' package.json; then
+            npm publish --access public
+          else
+            npm publish
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
