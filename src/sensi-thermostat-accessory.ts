@@ -1,5 +1,11 @@
-import { Logging, PlatformAccessory, Service, API } from 'homebridge';
-import { SensiAPI, DeviceStatePacket } from './sensi-api';
+import {
+  Logging,
+  PlatformAccessory,
+  Service,
+  API,
+  CharacteristicValue, // <-- added
+} from 'homebridge';
+import { SensiAPI } from './sensi-api';
 
 export class SensiThermostatAccessory {
   private service: Service;
@@ -10,20 +16,24 @@ export class SensiThermostatAccessory {
     private readonly api: SensiAPI,
     private readonly hap: API['hap']
   ) {
-    this.service = this.accessory.getService(this.hap.Service.Thermostat)
-      || this.accessory.addService(this.hap.Service.Thermostat);
+    this.service =
+      this.accessory.getService(this.hap.Service.Thermostat) ||
+      this.accessory.addService(this.hap.Service.Thermostat);
 
-    this.api.onDeviceUpdate((dev: DeviceStatePacket) => {
+    /* Listen for updates from the Sensi API */
+    this.api.onDeviceUpdate((dev) => {
       if (dev.icd_id.toLowerCase() === this.accessory.context.deviceId) {
         this.updateFromState(dev);
       }
     });
 
-    this.service.getCharacteristic(this.hap.Characteristic.TargetTemperature)
-      .onSet(async (value) => {
-        const tempC = Number(value); // HomeKit gives Celsius
+    /* Target temperature set from HomeKit */
+    this.service
+      .getCharacteristic(this.hap.Characteristic.TargetTemperature)
+      .onSet(async (value: CharacteristicValue) => {
+        const tempC = Number(value); // HomeKit supplies Celsius
         if (!Number.isFinite(tempC)) {
-          this.log.warn('Received invalid TargetTemperature from HomeKit:', value);
+          this.log.warn('Invalid TargetTemperature from HomeKit:', value);
           return;
         }
 
@@ -32,9 +42,8 @@ export class SensiThermostatAccessory {
         const scale = state?.state?.display_scale ?? 'f';
         const mode = state?.state?.operating_mode ?? 'auto';
 
-        // Convert back to Fahrenheit only if the device uses 'f'.
-        // Historically the device API expects integer Fahrenheit degrees; keep the rounding
-        // for Fahrenheit devices, but do not round Celsius devices.
+        // Convert to Fahrenheit only if the device expects it.
+        // Round because the Sensi API requires integer Fahrenheit values.
         let tempToSend: number;
         if (scale === 'f') {
           tempToSend = Math.round(tempC * 9 / 5 + 32);
@@ -42,50 +51,58 @@ export class SensiThermostatAccessory {
           tempToSend = tempC;
         }
 
-        this.log.debug('Setting temperature', { devId, tempToSend, mode, scale });
+        this.log.debug('Setting temperature', {
+          devId,
+          tempToSend,
+          mode,
+          scale,
+        });
         this.api.setTemperature(devId, tempToSend, mode, scale);
       });
 
-    this.service.getCharacteristic(this.hap.Characteristic.TargetHeatingCoolingState)
-      .onSet(async (value) => {
+    /* Heating/cooling mode set from HomeKit */
+    this.service
+      .getCharacteristic(this.hap.Characteristic.TargetHeatingCoolingState)
+      .onSet(async (value: CharacteristicValue) => {
         const devId = this.accessory.context.deviceId;
-        const mode = this.mapHapMode(value as number);
+        const mode = this.mapHapMode(Number(value));
         this.api.setMode(devId, mode);
       });
   }
 
-  private updateFromState(dev: DeviceStatePacket): void {
+  /** Update HomeKit characteristics from a device state packet */
+  private updateFromState(dev: any): void {
     this.accessory.context.lastState = dev;
     const s = dev.state;
     if (!s) return;
 
-    // debug-log the incoming state at debug level to help triage missing fields
     this.log.debug('Device state update', { id: dev.icd_id, state: s });
 
     const scale = s.display_scale ?? 'f';
 
-    // Guard current temperature
+    // Current temperature
     if (s.display_temp !== undefined && Number.isFinite(s.display_temp)) {
-      const currentTempC = scale === 'f' ? (s.display_temp - 32) * 5 / 9 : s.display_temp;
-      this.service.updateCharacteristic(this.hap.Characteristic.CurrentTemperature, currentTempC);
-    } else {
-      this.log.debug('Skipping CurrentTemperature update: display_temp missing or invalid', s.display_temp);
+      const currentTempC =
+        scale === 'f' ? (s.display_temp - 32) * 5 / 9 : s.display_temp;
+      this.service.updateCharacteristic(
+        this.hap.Characteristic.CurrentTemperature,
+        currentTempC
+      );
     }
 
-    // Guard target temperature (heat OR cool)
+    // Target temperature (heat or cool)
     const targetTempF = s.current_heat_temp ?? s.current_cool_temp;
     if (targetTempF !== undefined && Number.isFinite(targetTempF)) {
-      const targetTempC = scale === 'f' ? (targetTempF - 32) * 5 / 9 : targetTempF;
-      this.service.updateCharacteristic(this.hap.Characteristic.TargetTemperature, targetTempC);
-    } else {
-      this.log.debug('Skipping TargetTemperature update: no target temperature in state', {
-        current_heat_temp: s.current_heat_temp,
-        current_cool_temp: s.current_cool_temp
-      });
+      const targetTempC =
+        scale === 'f' ? (targetTempF - 32) * 5 / 9 : targetTempF;
+      this.service.updateCharacteristic(
+        this.hap.Characteristic.TargetTemperature,
+        targetTempC
+      );
     }
 
+    // HVAC mode
     const hvacMode = s.operating_mode;
-
     this.service.updateCharacteristic(
       this.hap.Characteristic.CurrentHeatingCoolingState,
       this.mapApiModeCurrent(hvacMode)
@@ -96,24 +113,35 @@ export class SensiThermostatAccessory {
     );
   }
 
+  /** Map API mode string to HomeKit CurrentHeatingCoolingState */
   private mapApiModeCurrent(mode: string): number {
     switch (mode) {
-      case 'heat': return this.hap.Characteristic.CurrentHeatingCoolingState.HEAT;
-      case 'cool': return this.hap.Characteristic.CurrentHeatingCoolingState.COOL;
-      case 'off': default: return this.hap.Characteristic.CurrentHeatingCoolingState.OFF;
+      case 'heat':
+        return this.hap.Characteristic.CurrentHeatingCoolingState.HEAT;
+      case 'cool':
+        return this.hap.Characteristic.CurrentHeatingCoolingState.COOL;
+      case 'off':
+      default:
+        return this.hap.Characteristic.CurrentHeatingCoolingState.OFF;
     }
   }
 
+  /** Map API mode string to HomeKit TargetHeatingCoolingState */
   private mapApiModeTarget(mode: string): number {
     switch (mode) {
-      case 'heat': return this.hap.Characteristic.TargetHeatingCoolingState.HEAT;
-      case 'cool': return this.hap.Characteristic.TargetHeatingCoolingState.COOL;
-      case 'auto': return this.hap.Characteristic.TargetHeatingCoolingState.AUTO;
-      case 'off': default: return this.hap.Characteristic.TargetHeatingCoolingState.OFF;
+      case 'heat':
+        return this.hap.Characteristic.TargetHeatingCoolingState.HEAT;
+      case 'cool':
+        return this.hap.Characteristic.TargetHeatingCoolingState.COOL;
+      case 'auto':
+        return this.hap.Characteristic.TargetHeatingCoolingState.AUTO;
+      case 'off':
+      default:
+        return this.hap.Characteristic.TargetHeatingCoolingState.OFF;
     }
   }
 
-  // Map HomeKit TargetHeatingCoolingState numbers to API mode strings
+  /** Convert HomeKit TargetHeatingCoolingState number to API mode string */
   private mapHapMode(value: number): string {
     switch (value) {
       case this.hap.Characteristic.TargetHeatingCoolingState.HEAT:
