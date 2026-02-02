@@ -1,6 +1,4 @@
-src/
 test/
-*.ts
 *.map
 node_modules/
 .git*
