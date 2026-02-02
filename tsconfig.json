@@ -8,7 +8,7 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "rootDir": "src",
-    "typeRoots": ["./node_modules/@types", "./node_modules"]
+    "typeRoots": ["./node_modules/@types"]   // <-- only the @types folder
   },
   "include": ["src"]
 }
