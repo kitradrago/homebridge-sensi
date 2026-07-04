@@ -18,25 +18,30 @@ class SensiSensorAccessory {
         });
     }
     updateFromState(dev) {
-        this.accessory.context.lastState = dev;
-        const s = dev.state;
-        if (!s)
-            return;
-        this.log.debug('Sensor accessory device state update', { id: dev.icd_id, state: s });
-        const scale = s.display_scale ?? 'f';
-        // Convert Fahrenheit to Celsius for HomeKit
-        if (s.display_temp !== undefined && Number.isFinite(s.display_temp)) {
-            const tempC = scale === 'f' ? (s.display_temp - 32) * 5 / 9 : s.display_temp;
-            this.tempService.updateCharacteristic(this.hap.Characteristic.CurrentTemperature, tempC);
+        try {
+            this.accessory.context.lastState = dev;
+            const s = dev.state;
+            if (!s)
+                return;
+            this.log.debug('[Sensi] Sensor accessory device state update', { id: dev.icd_id, state: s });
+            const scale = s.display_scale ?? 'f';
+            // Convert Fahrenheit to Celsius for HomeKit
+            if (s.display_temp !== undefined && Number.isFinite(s.display_temp)) {
+                const tempC = scale === 'f' ? (s.display_temp - 32) * 5 / 9 : s.display_temp;
+                this.tempService.updateCharacteristic(this.hap.Characteristic.CurrentTemperature, tempC);
+            }
+            else {
+                this.log.debug('[Sensi] Skipping TemperatureSensor update: display_temp missing or invalid', s.display_temp);
+            }
+            if (s.humidity !== undefined && Number.isFinite(s.humidity)) {
+                this.humidityService.updateCharacteristic(this.hap.Characteristic.CurrentRelativeHumidity, s.humidity);
+            }
+            else {
+                this.log.debug('[Sensi] Skipping HumiditySensor update: humidity missing or invalid', s.humidity);
+            }
         }
-        else {
-            this.log.debug('Skipping TemperatureSensor update: display_temp missing or invalid', s.display_temp);
-        }
-        if (s.humidity !== undefined && Number.isFinite(s.humidity)) {
-            this.humidityService.updateCharacteristic(this.hap.Characteristic.CurrentRelativeHumidity, s.humidity);
-        }
-        else {
-            this.log.debug('Skipping HumiditySensor update: humidity missing or invalid', s.humidity);
+        catch (error) {
+            this.log.error('[Sensi] Error updating sensor state:', error instanceof Error ? error.message : String(error));
         }
     }
 }
