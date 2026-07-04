@@ -23,6 +23,7 @@ export class SensiAPI {
   private reconnecting = false;
   private closingIntentionally = false;
   private pingInterval: NodeJS.Timeout | null = null;
+  private serverPingIntervalMs = 25000;
 
   constructor(
     refreshToken: string,
@@ -85,8 +86,11 @@ export class SensiAPI {
 
     this.ws = new WebSocket(this.wsUrl, { headers: this.wsHeaders() });
     this.ws.on("open", () => {
-      this.log.info("[Sensi] WebSocket connected");
-      this.startKeepAlive();
+      this.log.info(
+        "[Sensi] WebSocket transport connected, awaiting engine.io handshake",
+      );
+      // Keep-alive is started only after the socket.io namespace handshake
+      // completes (see handleMessage's handling of the '0' packet below).
     });
     this.ws.on("message", (data) => this.handleMessage(data));
     this.ws.on("close", () => {
@@ -129,6 +133,36 @@ export class SensiAPI {
 
   private async handleMessage(raw: WebSocket.Data): Promise<void> {
     const msg = typeof raw === "string" ? raw : raw.toString("utf-8");
+
+    // engine.io "open" handshake packet: '0' + JSON with sid/pingInterval/etc.
+    // The client MUST reply with '40' to connect to the default socket.io
+    // namespace. Without this reply the transport looks "connected" but the
+    // server never considers the client actually joined — it will silently
+    // drop the socket once its own pingInterval/pingTimeout elapses, with no
+    // error on our side. This was the actual cause of the ~90s-later drops.
+    if (msg.startsWith("0{")) {
+      try {
+        const handshake = JSON.parse(msg.slice(1));
+        if (typeof handshake.pingInterval === "number") {
+          this.serverPingIntervalMs = handshake.pingInterval;
+        }
+      } catch (e) {
+        this.log.debug(
+          "[Sensi] Failed to parse engine.io handshake payload:",
+          e,
+        );
+      }
+      this.ws?.send("40");
+      return;
+    }
+
+    // engine.io/socket.io namespace connect ack — handshake is now fully
+    // complete and it's safe to start our keep-alive loop.
+    if (msg.startsWith("40")) {
+      this.log.info("[Sensi] Socket.io handshake complete, connection live");
+      this.startKeepAlive();
+      return;
+    }
 
     // engine.io protocol-level ping — server expects a "3" (pong) reply.
     // Without this, the server considers the client dead and drops the
@@ -204,12 +238,17 @@ export class SensiAPI {
 
   private startKeepAlive(): void {
     this.stopKeepAlive();
+    // Use a raw WS ping as a belt-and-suspenders connection check; the real
+    // engine.io keep-alive is driven by the server's '2' pings, which we
+    // answer with '3' in handleMessage(). Interval is derived from the
+    // server's handshake so it never runs slower than the server expects.
+    const intervalMs = Math.min(this.serverPingIntervalMs, 30000);
     this.pingInterval = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
         this.ws.ping();
         this.log.debug("[Sensi] Sent keep-alive ping");
       }
-    }, 30000); // every 30s
+    }, intervalMs);
   }
 
   private stopKeepAlive(): void {
