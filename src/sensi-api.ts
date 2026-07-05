@@ -11,6 +11,11 @@ export interface DeviceStatePacket {
 
 export type DeviceUpdateListener = (device: DeviceStatePacket) => void;
 
+interface QueuedCommand {
+  frame: string;
+  queuedAt: number;
+}
+
 export class SensiAPI {
   private readonly oauthUrl = "https://oauth.sensiapi.io/token";
   private readonly wsUrl =
@@ -18,12 +23,21 @@ export class SensiAPI {
 
   private refreshToken: string;
   private accessToken: string | null = null;
+  private tokenExpiresAt = 0; // epoch ms; 0 = unknown
+
   private ws: WebSocket | null = null;
+  private handshakeComplete = false;
   private listeners: Set<DeviceUpdateListener> = new Set();
   private reconnecting = false;
-  private closingIntentionally = false;
-  private pingInterval: NodeJS.Timeout | null = null;
+
   private serverPingIntervalMs = 25000;
+  private serverPingTimeoutMs = 20000;
+  private watchdog: NodeJS.Timeout | null = null;
+
+  // Commands issued while disconnected are queued briefly and flushed on
+  // (re)connect instead of being dropped on the floor.
+  private commandQueue: QueuedCommand[] = [];
+  private readonly commandQueueTtlMs = 30000;
 
   constructor(
     refreshToken: string,
@@ -31,6 +45,8 @@ export class SensiAPI {
   ) {
     this.refreshToken = refreshToken;
   }
+
+  // ---------------------------------------------------------------- auth ---
 
   async authenticate(): Promise<void> {
     try {
@@ -57,6 +73,17 @@ export class SensiAPI {
 
       this.accessToken = resp.data.access_token;
 
+      // Track expiry so we can refresh proactively instead of waiting for
+      // the server to reject/drop us with a stale token.
+      if (
+        typeof resp.data.expires_in === "number" &&
+        resp.data.expires_in > 0
+      ) {
+        this.tokenExpiresAt = Date.now() + resp.data.expires_in * 1000;
+      } else {
+        this.tokenExpiresAt = 0;
+      }
+
       // Only rotate the refresh token if the server actually sent a new one.
       // Overwriting with undefined bricks all future re-auths until restart.
       if (
@@ -74,33 +101,62 @@ export class SensiAPI {
     }
   }
 
+  private tokenIsFresh(): boolean {
+    if (!this.accessToken) return false;
+    if (this.tokenExpiresAt === 0) return true; // unknown expiry, assume ok
+    return Date.now() < this.tokenExpiresAt - 60_000; // 60s safety margin
+  }
+
   private wsHeaders(): Record<string, string> {
     return { Authorization: `bearer ${this.accessToken}` };
   }
 
+  // ---------------------------------------------------------- connection ---
+
   async connect(): Promise<void> {
-    if (!this.accessToken) await this.authenticate();
+    if (!this.tokenIsFresh()) {
+      await this.authenticate();
+    }
 
-    // Close existing connection cleanly
-    this.closeWebSocket();
+    // Tear down any existing socket. We do NOT rely on a shared instance
+    // flag to suppress its close event — every event handler below is
+    // guarded by socket identity instead (see `socket !== this.ws` checks),
+    // which cannot be stranded in a wrong state the way a boolean can.
+    this.teardownSocket();
 
-    this.ws = new WebSocket(this.wsUrl, { headers: this.wsHeaders() });
-    this.ws.on("open", () => {
+    const socket = new WebSocket(this.wsUrl, { headers: this.wsHeaders() });
+    this.ws = socket;
+    this.handshakeComplete = false;
+
+    socket.on("open", () => {
+      if (socket !== this.ws) return; // stale socket, ignore
       this.log.info(
         "[Sensi] WebSocket transport connected, awaiting engine.io handshake",
       );
-      // Keep-alive is started only after the socket.io namespace handshake
-      // completes (see handleMessage's handling of the '0' packet below).
+      // Watchdog starts immediately: if the handshake never arrives, we
+      // still want to detect the dead connection and retry.
+      this.resetWatchdog();
     });
-    this.ws.on("message", (data) => this.handleMessage(data));
-    this.ws.on("close", () => {
-      if (this.closingIntentionally) {
-        this.closingIntentionally = false;
-        return;
-      }
+
+    socket.on("message", (data) => {
+      if (socket !== this.ws) return;
+      this.resetWatchdog(); // any inbound traffic proves liveness
+      this.handleMessage(data);
+    });
+
+    socket.on("pong", () => {
+      if (socket !== this.ws) return;
+      this.resetWatchdog();
+    });
+
+    socket.on("close", (code) => {
+      if (socket !== this.ws) return; // an old socket we already replaced
+      this.log.warn(`[Sensi] WebSocket closed (code ${code})`);
       this.scheduleReconnect("closed");
     });
-    this.ws.on("error", (err) => {
+
+    socket.on("error", (err) => {
+      if (socket !== this.ws) return;
       this.log.error(
         "[Sensi] WebSocket error:",
         err instanceof Error ? err.message : String(err),
@@ -109,42 +165,69 @@ export class SensiAPI {
     });
   }
 
-  private closeWebSocket(): void {
-    if (this.ws) {
-      // Prevent the old socket's own 'close' handler from firing a
-      // redundant reconnect — this was previously causing a
-      // connect -> drop -> reconnect churn loop.
-      this.closingIntentionally = true;
+  /** Remove and forcibly terminate the current socket without side effects. */
+  private teardownSocket(): void {
+    this.stopWatchdog();
+    const old = this.ws;
+    this.ws = null; // identity guards in old handlers now no-op
+    this.handshakeComplete = false;
+    if (old) {
       try {
-        this.ws.removeAllListeners();
-        if (
-          this.ws.readyState === WebSocket.OPEN ||
-          this.ws.readyState === WebSocket.CONNECTING
-        ) {
-          this.ws.close();
-        }
+        old.removeAllListeners();
+        // terminate() rather than close(): close() performs a graceful
+        // shutdown handshake that can hang on a half-open connection,
+        // which is exactly the situation we're usually in here.
+        old.terminate();
       } catch (e) {
-        this.log.debug("[Sensi] Error closing WebSocket:", e);
+        this.log.debug("[Sensi] Error terminating old WebSocket:", e);
       }
-      this.ws = null;
     }
-    this.stopKeepAlive();
   }
+
+  // ------------------------------------------------------------ watchdog ---
+
+  /**
+   * Liveness watchdog. The server pings us every `pingInterval` ms and
+   * expects a pong within `pingTimeout` ms; symmetrically, if WE hear
+   * nothing (no ping, no state, no pong) for pingInterval + pingTimeout,
+   * the connection is dead even if readyState still claims OPEN. This is
+   * the half-open-TCP case (common on WiFi) where no 'close' event will
+   * ever fire on its own.
+   */
+  private resetWatchdog(): void {
+    this.stopWatchdog();
+    const timeoutMs =
+      this.serverPingIntervalMs + this.serverPingTimeoutMs + 5000;
+    this.watchdog = setTimeout(() => {
+      this.log.warn(
+        `[Sensi] No traffic from server in ${Math.round(timeoutMs / 1000)}s — connection presumed dead`,
+      );
+      this.scheduleReconnect("watchdog timeout");
+    }, timeoutMs);
+  }
+
+  private stopWatchdog(): void {
+    if (this.watchdog) {
+      clearTimeout(this.watchdog);
+      this.watchdog = null;
+    }
+  }
+
+  // ------------------------------------------------------------ messages ---
 
   private async handleMessage(raw: WebSocket.Data): Promise<void> {
     const msg = typeof raw === "string" ? raw : raw.toString("utf-8");
 
-    // engine.io "open" handshake packet: '0' + JSON with sid/pingInterval/etc.
-    // The client MUST reply with '40' to connect to the default socket.io
-    // namespace. Without this reply the transport looks "connected" but the
-    // server never considers the client actually joined — it will silently
-    // drop the socket once its own pingInterval/pingTimeout elapses, with no
-    // error on our side. This was the actual cause of the ~90s-later drops.
+    // engine.io "open" handshake: '0' + JSON {sid, pingInterval, pingTimeout}.
+    // We must reply '40' to join the default socket.io namespace.
     if (msg.startsWith("0{")) {
       try {
         const handshake = JSON.parse(msg.slice(1));
         if (typeof handshake.pingInterval === "number") {
           this.serverPingIntervalMs = handshake.pingInterval;
+        }
+        if (typeof handshake.pingTimeout === "number") {
+          this.serverPingTimeoutMs = handshake.pingTimeout;
         }
       } catch (e) {
         this.log.debug(
@@ -156,32 +239,34 @@ export class SensiAPI {
       return;
     }
 
-    // engine.io/socket.io namespace connect ack — handshake is now fully
-    // complete and it's safe to start our keep-alive loop.
+    // socket.io namespace connect ack — connection is now fully live.
     if (msg.startsWith("40")) {
       this.log.info("[Sensi] Socket.io handshake complete, connection live");
-      this.startKeepAlive();
+      this.handshakeComplete = true;
+      this.flushCommandQueue();
       return;
     }
 
-    // engine.io protocol-level ping — server expects a "3" (pong) reply.
-    // Without this, the server considers the client dead and drops the
-    // socket on its own ping-timeout, causing periodic disconnects.
+    // engine.io ping — must answer '3' or the server drops us.
     if (msg === "2") {
       this.ws?.send("3");
       return;
     }
 
-    // engine.io "noop"/disconnect frame
+    // socket.io namespace disconnect frame
     if (msg === "41") {
       this.log.warn("[Sensi] Server sent disconnect frame.");
       this.scheduleReconnect("server disconnect");
       return;
     }
 
+    // socket.io error frame — most commonly auth/token rejection here.
     if (msg.startsWith("44")) {
-      this.log.warn("[Sensi] Token expired. Refreshing...");
-      await this.reconnectWithNewToken();
+      this.log.warn(
+        "[Sensi] Server error frame (likely token expired). Refreshing...",
+      );
+      this.accessToken = null; // force re-auth on reconnect
+      this.scheduleReconnect("auth error", 1000);
       return;
     }
 
@@ -205,75 +290,89 @@ export class SensiAPI {
     }
   }
 
-  private async reconnectWithNewToken(): Promise<void> {
-    try {
-      await this.authenticate();
-      await this.connect();
-    } catch (e) {
-      this.log.error(
-        "[Sensi] Reconnect failed:",
-        e instanceof Error ? e.message : String(e),
-      );
-      this.scheduleReconnect("auth failed");
-    }
-  }
+  // ----------------------------------------------------------- reconnect ---
 
-  private scheduleReconnect(reason: string): void {
+  private scheduleReconnect(reason: string, delayMs = 10000): void {
     if (this.reconnecting) return;
     this.reconnecting = true;
-    this.stopKeepAlive();
-    this.log.warn(`[Sensi] Scheduling reconnect due to ${reason}`);
+
+    // Kill the current socket immediately so nothing else fires from it
+    // and commands start queueing rather than going into a dead pipe.
+    this.teardownSocket();
+
+    this.log.warn(
+      `[Sensi] Scheduling reconnect in ${Math.round(delayMs / 1000)}s (reason: ${reason})`,
+    );
     setTimeout(async () => {
       this.reconnecting = false;
       try {
-        await this.reconnectWithNewToken();
+        if (!this.tokenIsFresh()) {
+          await this.authenticate();
+        }
+        await this.connect();
       } catch (e) {
         this.log.error(
-          "[Sensi] Retry reconnect failed:",
+          "[Sensi] Reconnect failed:",
           e instanceof Error ? e.message : String(e),
         );
+        // Try again — this self-perpetuates until a connect succeeds.
+        this.scheduleReconnect("retry after failure", 30000);
       }
-    }, 10000); // 10s backoff
+    }, delayMs);
   }
 
-  private startKeepAlive(): void {
-    this.stopKeepAlive();
-    // Use a raw WS ping as a belt-and-suspenders connection check; the real
-    // engine.io keep-alive is driven by the server's '2' pings, which we
-    // answer with '3' in handleMessage(). Interval is derived from the
-    // server's handshake so it never runs slower than the server expects.
-    const intervalMs = Math.min(this.serverPingIntervalMs, 30000);
-    this.pingInterval = setInterval(() => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.ws.ping();
-        this.log.debug("[Sensi] Sent keep-alive ping");
-      }
-    }, intervalMs);
-  }
-
-  private stopKeepAlive(): void {
-    if (this.pingInterval) {
-      clearInterval(this.pingInterval);
-      this.pingInterval = null;
-    }
-  }
+  // ------------------------------------------------------------- commands ---
 
   onDeviceUpdate(listener: DeviceUpdateListener): void {
     this.listeners.add(listener);
   }
 
-  // Send commands using socket.io protocol
+  private connectionReady(): boolean {
+    return (
+      this.ws !== null &&
+      this.ws.readyState === WebSocket.OPEN &&
+      this.handshakeComplete
+    );
+  }
+
   private sendSet(json: any): void {
-    // socket.io emit frame: '42' + JSON.stringify([event, data])
     const frame = "42" + JSON.stringify(json);
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(frame);
+
+    if (this.connectionReady()) {
+      this.ws!.send(frame);
       this.log.debug("[Sensi] Command sent:", JSON.stringify(json));
-    } else {
-      this.log.warn(
-        "[Sensi] WS not open. Dropping command:",
-        JSON.stringify(json),
-      );
+      return;
+    }
+
+    // Not connected (or mid-handshake): queue briefly instead of dropping.
+    this.commandQueue.push({ frame, queuedAt: Date.now() });
+    this.log.warn(
+      "[Sensi] Connection not ready — queued command:",
+      JSON.stringify(json),
+    );
+
+    // If we're sitting idle with no reconnect in flight, kick one off now
+    // rather than waiting for a watchdog/close that may never come.
+    if (!this.reconnecting) {
+      this.scheduleReconnect("command while disconnected", 0);
+    }
+  }
+
+  private flushCommandQueue(): void {
+    if (this.commandQueue.length === 0) return;
+    const now = Date.now();
+    const fresh = this.commandQueue.filter(
+      (c) => now - c.queuedAt < this.commandQueueTtlMs,
+    );
+    const expired = this.commandQueue.length - fresh.length;
+    this.commandQueue = [];
+
+    if (expired > 0) {
+      this.log.warn(`[Sensi] Discarded ${expired} stale queued command(s)`);
+    }
+    for (const cmd of fresh) {
+      this.ws?.send(cmd.frame);
+      this.log.info("[Sensi] Flushed queued command:", cmd.frame.slice(2));
     }
   }
 
