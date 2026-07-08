@@ -38,6 +38,7 @@ export class SensiPlatform implements DynamicPlatformPlugin {
       this.sensiApi = new SensiAPI(
         this.config.refreshToken as string,
         this.log,
+        this.config.deviceId as string | undefined,
       );
       await this.sensiApi.authenticate();
       await this.sensiApi.connect();

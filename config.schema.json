@@ -13,11 +13,13 @@
         "type": "string",
         "title": "Sensi Refresh Token",
         "description": "Paste the refresh token obtained from Emerson Sensi. See Readme.md for instructions"
+      },
+      "deviceId": {
+        "type": "string",
+        "title": "Sensi Device ID",
+        "description": "The device identifier (looks like 'FL33T-yourusername-1234567890') seen in the token request URL in your browser's dev tools when logging in at manager.sensicomfort.com. As of Sensi app v8.6.3+, the WebSocket session appears to validate against this identifier, so connections may be silently rejected without it."
       }
     },
-    "required": [
-      "name",
-      "refreshToken"
-    ]
+    "required": ["name", "refreshToken"]
   }
 }

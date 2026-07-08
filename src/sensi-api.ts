@@ -22,6 +22,7 @@ export class SensiAPI {
     "wss://rt.sensiapi.io/thermostat/?transport=websocket";
 
   private refreshToken: string;
+  private readonly deviceId?: string;
   private accessToken: string | null = null;
   private tokenExpiresAt = 0; // epoch ms; 0 = unknown
 
@@ -42,8 +43,10 @@ export class SensiAPI {
   constructor(
     refreshToken: string,
     private readonly log: Logging,
+    deviceId?: string,
   ) {
     this.refreshToken = refreshToken;
+    this.deviceId = deviceId;
   }
 
   // ---------------------------------------------------------------- auth ---
@@ -59,7 +62,16 @@ export class SensiAPI {
       form.set("grant_type", "refresh_token");
       form.set("refresh_token", this.refreshToken);
 
-      const resp = await axios.post(this.oauthUrl, form.toString(), {
+      // The browser's login flow posts to /token?device=<FL33T-...> rather
+      // than plain /token. If the WebSocket layer validates the access
+      // token against the device identifier it was minted with, omitting
+      // this would explain a token that "authenticates" fine but gets
+      // silently rejected at the realtime layer.
+      const url = this.deviceId
+        ? `${this.oauthUrl}?device=${encodeURIComponent(this.deviceId)}`
+        : this.oauthUrl;
+
+      const resp = await axios.post(url, form.toString(), {
         headers: {
           "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
           Accept: "*/*",
