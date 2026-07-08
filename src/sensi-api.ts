@@ -149,9 +149,13 @@ export class SensiAPI {
       this.resetWatchdog();
     });
 
-    socket.on("close", (code) => {
+    socket.on("close", (code, reason) => {
       if (socket !== this.ws) return; // an old socket we already replaced
-      this.log.warn(`[Sensi] WebSocket closed (code ${code})`);
+      const reasonStr =
+        reason && reason.length
+          ? reason.toString("utf-8")
+          : "(no reason given)";
+      this.log.warn(`[Sensi] WebSocket closed (code ${code}): ${reasonStr}`);
       this.scheduleReconnect("closed");
     });
 
@@ -244,6 +248,22 @@ export class SensiAPI {
       this.log.info("[Sensi] Socket.io handshake complete, connection live");
       this.handshakeComplete = true;
       this.flushCommandQueue();
+
+      // Only treat the backoff as "recovered" once this connection has
+      // stayed up for a while — a handshake that succeeds and then
+      // immediately closes (e.g. server-side rate limiting) should keep
+      // backing off, not reset to fast retries every time.
+      const socketAtHandshake = this.ws;
+      setTimeout(() => {
+        if (this.ws === socketAtHandshake && this.handshakeComplete) {
+          if (this.reconnectAttempt > 0) {
+            this.log.info(
+              "[Sensi] Connection stable — resetting reconnect backoff",
+            );
+          }
+          this.reconnectAttempt = 0;
+        }
+      }, 60000);
       return;
     }
 
@@ -292,7 +312,10 @@ export class SensiAPI {
 
   // ----------------------------------------------------------- reconnect ---
 
-  private scheduleReconnect(reason: string, delayMs = 10000): void {
+  private reconnectAttempt = 0;
+  private readonly maxBackoffMs = 5 * 60 * 1000; // cap at 5 minutes
+
+  private scheduleReconnect(reason: string, delayMs?: number): void {
     if (this.reconnecting) return;
     this.reconnecting = true;
 
@@ -300,8 +323,24 @@ export class SensiAPI {
     // and commands start queueing rather than going into a dead pipe.
     this.teardownSocket();
 
+    let delay = delayMs;
+    if (delay === undefined) {
+      // Exponential backoff with jitter. If the server is closing us
+      // instantly and repeatedly (e.g. rate-limiting/abuse protection),
+      // hammering it every 10s makes that worse. Back off harder the more
+      // consecutive failures we've seen, and reset the counter once a
+      // connection actually survives (see connect()'s handshake success).
+      this.reconnectAttempt += 1;
+      const base = Math.min(
+        5000 * 2 ** (this.reconnectAttempt - 1),
+        this.maxBackoffMs,
+      );
+      const jitter = base * 0.2 * Math.random();
+      delay = Math.round(base + jitter);
+    }
+
     this.log.warn(
-      `[Sensi] Scheduling reconnect in ${Math.round(delayMs / 1000)}s (reason: ${reason})`,
+      `[Sensi] Scheduling reconnect in ${Math.round(delay / 1000)}s (reason: ${reason}, attempt ${this.reconnectAttempt})`,
     );
     setTimeout(async () => {
       this.reconnecting = false;
@@ -316,9 +355,9 @@ export class SensiAPI {
           e instanceof Error ? e.message : String(e),
         );
         // Try again — this self-perpetuates until a connect succeeds.
-        this.scheduleReconnect("retry after failure", 30000);
+        this.scheduleReconnect("retry after failure");
       }
-    }, delayMs);
+    }, delay);
   }
 
   // ------------------------------------------------------------- commands ---
@@ -352,9 +391,11 @@ export class SensiAPI {
     );
 
     // If we're sitting idle with no reconnect in flight, kick one off now
-    // rather than waiting for a watchdog/close that may never come.
+    // rather than waiting for a watchdog/close that may never come. This
+    // still respects normal backoff timing rather than forcing an instant
+    // retry, so a burst of user commands can't itself cause rate-limit churn.
     if (!this.reconnecting) {
-      this.scheduleReconnect("command while disconnected", 0);
+      this.scheduleReconnect("command while disconnected");
     }
   }
 
