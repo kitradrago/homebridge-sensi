@@ -18,8 +18,26 @@ interface QueuedCommand {
 
 export class SensiAPI {
   private readonly oauthUrl = "https://oauth.sensiapi.io/token";
-  private readonly wsUrl =
-    "wss://rt.sensiapi.io/thermostat/?transport=websocket";
+
+  // The reference implementation (iprak/sensi, a working Home Assistant
+  // integration using the same realtime endpoint) always attaches this
+  // capabilities query string when connecting. Our previous URL omitted it
+  // entirely. That's the most likely reason the socket.io handshake
+  // completed successfully but was killed immediately afterward every
+  // single time: the server may treat a connection with no declared
+  // capabilities as incomplete/invalid and silently drop it once the
+  // handshake finishes, rather than during the handshake itself.
+  private readonly wsCapabilitiesQuery =
+    "capabilities=display_humidity,operating_mode_settings,fan_mode_settings,indoor_equipment," +
+    "outdoor_equipment,indoor_stages,outdoor_stages,continuous_backlight,degrees_fc,display_time," +
+    "keypad_lockout,temp_offset,compressor_lockout,boost,heat_cycle_rate,heat_cycle_rate_steps," +
+    "cool_cycle_rate,cool_cycle_rate_steps,aux_cycle_rate,aux_cycle_rate_steps,early_start," +
+    "min_heat_setpoint,max_heat_setpoint,min_cool_setpoint,max_cool_setpoint,circulating_fan," +
+    "humidity_control,humidity_offset,humidity_offset_lower_bound,humidity_offset_upper_bound," +
+    "temp_offset_lower_bound,temp_offset_upper_bound,lowest_heat_setpoint_ceiling,heat_setpoint_ceiling," +
+    "highest_cool_setpoint_floor,cool_setpoint_floor";
+
+  private readonly wsUrl = `wss://rt.sensiapi.io/thermostat/?transport=websocket&${this.wsCapabilitiesQuery}`;
 
   private refreshToken: string;
   private readonly deviceId?: string;
