@@ -148,8 +148,16 @@ export class SensiThermostatAccessory {
   /** Update HomeKit characteristics from a device state packet */
   private updateFromState(dev: DeviceStatePacket): void {
     try {
-      this.accessory.context.lastState = dev;
-      const s = dev.state;
+      // The realtime socket sends a full snapshot on initial sync but only a
+      // partial delta (just the changed fields) for live pushes triggered by
+      // the physical device. Merge onto the last known state instead of
+      // overwriting, otherwise a delta missing e.g. `operating_mode` silently
+      // breaks the branch below and the update gets dropped.
+      const previous = this.accessory.context.lastState?.state ?? {};
+      const mergedState = { ...previous, ...(dev.state ?? {}) };
+      const merged: DeviceStatePacket = { ...dev, state: mergedState };
+      this.accessory.context.lastState = merged;
+      const s = mergedState;
       if (!s) return;
 
       this.log.debug('[Sensi] Device state update', { id: dev.icd_id, state: s });
